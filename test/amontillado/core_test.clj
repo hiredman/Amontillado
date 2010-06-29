@@ -12,11 +12,11 @@
 
 (deftest concurrent-read-write
   (.clear key-table)
-  (let [agents (take 20 (repeatedly #(agent nil)))]
+  (let [agents (take 200 (repeatedly #(agent nil)))]
     (doseq [agent agents]
       (send-off agent
                 (fn [_]
-                  (dotimes [ii 200]
+                  (dotimes [ii 20]
                     (let [a (.getBytes (str (rand-int ii) ii))]
                       (assoc cask a a))))))
     (apply await agents)
