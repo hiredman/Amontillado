@@ -4,7 +4,8 @@
            [java.io File RandomAccessFile]
            [java.util.concurrent ConcurrentHashMap]
            [clojure.lang ILookup Associative PersistentQueue]
-           [java.nio ByteBuffer]))
+           [java.nio ByteBuffer]
+           [java.util.zip CRC32]))
 
 (def dir (or (System/getProperty "cask.dir") "/tmp/amontillado"))
 
@@ -12,15 +13,17 @@
 
 (def casks (ref (PersistentQueue/EMPTY)))
 
-(def size (* 1024 1024 200))
+(def size 209715200)
 
 (def closeable (agent nil))
 
 (def open-casks 5)
 
+(def key-table (ConcurrentHashMap.))
+
 (defrecord Cask [name file channel])
 
-(defrecord Vtable [file-name pos size])
+(defrecord Vtable [file-name pos size crc])
 
 (defn new-cask []
   (let [file-name (format "%s/%s.cask" dir (UUID/randomUUID))
@@ -48,30 +51,40 @@
     (.close (:file cask))))
 
 (defn write [bytebuffer]
-  (let [cask (aquire)
+  (let [crc (.getValue
+             (doto (CRC32.)
+               (.update (.array bytebuffer))))
+        cask (aquire)
         fc (:channel cask)
         start (.position fc)]
     (try
      (.position fc (+ start (.capacity bytebuffer)))
      (finally
       (release cask)))
+    (.putLong bytebuffer 8 crc)
     (.write fc bytebuffer start)
     (send-off closeable close-casks)
-    (Vtable. (:name cask) start (.capacity bytebuffer))))
-
-(defonce key-table (ConcurrentHashMap.))
+    (Vtable. (:name cask) start (.capacity bytebuffer) crc)))
 
 (defn read-fn [vtable]
-  (with-open [cask (RandomAccessFile. (:file-name vtable) "rw")]
-    (.seek cask (:pos vtable))
-    (let [time (.readLong cask)
-          value-size (.readLong cask)
-          value (byte-array value-size)
-          key-size (.readLong cask)
-          key (byte-array key-size)]
-      (.read cask value)
-      (.read cask key)
-      value)))
+  (with-open [cask (RandomAccessFile. (:file-name vtable) "rw")
+              fc (.getChannel cask)]
+    (let [bb (ByteBuffer/allocate (:size vtable))]
+      (.read fc bb (:pos vtable))
+      (.flip bb)
+      (let [time (.getLong bb)
+            crc (.getLong bb)
+            value-size (.getLong bb)
+            key-size (.getLong bb)
+            value (byte-array value-size)
+            _ (.putLong bb 8 0)
+            crc (.getValue
+                 (doto (CRC32.)
+                   (.update (.array bb))))]
+        (assert (= crc (:crc vtable)))
+        (.position bb 32)
+        (.get bb value)
+        value))))
 
 (def cask
      (reify
@@ -92,13 +105,22 @@
         (let [key-size (count key)
               value-size (count value)
               time (System/nanoTime)
-              entry (doto (ByteBuffer/allocate (+ 8 8 value-size 8 key-size))
+              entry (doto (ByteBuffer/allocate (+ 8 8 8 value-size 8 key-size))
                       (.putLong 0 time)
-                      (.putLong 8 value-size)
-                      (.putLong 16 key-size)
-                      (.position 24)
+                      (.putLong 8 0)
+                      (.putLong 16 value-size)
+                      (.putLong 24 key-size)
+                      (.position 32)
                       (.put value)
                       (.put key)
                       .flip)]
           (.put key-table (String. key "utf8") (write entry)))
         this)))
+
+(defn recover []
+  ;; TODO:
+  )
+
+(defn compact []
+  ;; TODO:
+  )
