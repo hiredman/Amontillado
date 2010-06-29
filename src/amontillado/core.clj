@@ -23,7 +23,7 @@
 
 (defrecord Cask [name file channel])
 
-(defrecord Vtable [file-name pos size crc])
+(defrecord Vtable [file-name pos size crc timestamp])
 
 (defn new-cask []
   (let [file-name (format "%s/%s.cask" dir (UUID/randomUUID))
@@ -57,14 +57,12 @@
         cask (aquire)
         fc (:channel cask)
         start (.position fc)]
-    (try
-     (.position fc (+ start (.capacity bytebuffer)))
-     (finally
-      (release cask)))
+    (.position fc (+ start (.capacity bytebuffer)))
+    (release cask)
     (.putLong bytebuffer 8 crc)
     (.write fc bytebuffer start)
     (send-off closeable close-casks)
-    (Vtable. (:name cask) start (.capacity bytebuffer) crc)))
+    (Vtable. (:name cask) start (.capacity bytebuffer) crc (.getLong bytebuffer 0))))
 
 (defn read-fn [vtable]
   (with-open [cask (RandomAccessFile. (:file-name vtable) "rw")
