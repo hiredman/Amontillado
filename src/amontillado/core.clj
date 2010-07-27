@@ -70,9 +70,9 @@
               fc (.getChannel cask)]
     (let [bb (ByteBuffer/allocate (:size vtable))]
       (.read fc bb (:pos vtable))
-      (.flip bb)
+      (.position bb 0)
       (let [time (.getLong bb)
-            crc (.getLong bb)
+            crc1 (.getLong bb)
             value-size (.getLong bb)
             key-size (.getLong bb)
             value (byte-array value-size)
@@ -92,7 +92,10 @@
       (valAt [this key default]
              (let [key (String. ^bytes key "utf8")]
                (if (.get key-table key)
-                 (read-fn (.get key-table key))
+                 (try
+                   (read-fn (.get key-table key))
+                   (catch Exception e
+                     (throw (Exception. (str "problem reading " key) e))))
                  default)))
       Associative
       (containsKey [this key]
@@ -116,9 +119,38 @@
           (.put key-table (String. ^bytes key "utf8") (write entry)))
         this)))
 
+(defn entry-seq [file]
+  (with-open [dis (-> file (RandomAccessFile. "r"))]
+    (letfn [(f
+             [place]
+             (lazy-seq
+              (when (> (.length file) place)
+                (.seek dis place)
+                (let [time (.readLong dis)
+                      crc (.readLong dis)
+                      value-size (.readLong dis)
+                      key-size (.readLong dis)
+                      key-bytes (byte-array key-size)]
+                  (.seek dis (+ place 32 value-size))
+                  (.read dis key-bytes)
+                  (cons
+                   [(String. key-bytes "utf8")
+                    (Vtable. (str (.getParent file) "/" (.getName file))
+                             place
+                             (+ 8 8 8 8 value-size key-size)
+                             crc
+                             time)]
+                   (f (.getFilePointer dis)))))))]
+      (doall (f 0)))))
+
+(defn entries []
+  (mapcat entry-seq (rest (file-seq (File. dir)))))
+
 (defn recover []
-  ;; TODO:
-  )
+  (doseq [[key vtable] (entries)]
+    (if-let [c-vtable (get key-table key)]
+      (.put key-table key (last (sort-by :timestamp [c-vtable vtable]))) 
+      (.put key-table key vtable))))
 
 (defn compact []
   ;; TODO:
