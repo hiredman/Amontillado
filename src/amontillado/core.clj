@@ -14,7 +14,7 @@
 
 (def casks (ref (PersistentQueue/EMPTY)))
 
-(def size 209715200)
+(def size (* 1024 1024 200))
 
 (def closeable (agent nil))
 
@@ -63,13 +63,16 @@
     (.putLong bytebuffer 8 crc)
     (.write fc bytebuffer (long start))
     (send-off closeable close-casks)
-    (Vtable. (:name cask) start (.capacity bytebuffer) crc (.getLong bytebuffer 0))))
+    (Vtable.
+     (:name cask) start (.capacity bytebuffer) crc (.getLong bytebuffer 0))))
 
 (defn read-fn [vtable]
   (with-open [cask (RandomAccessFile. ^String (:file-name vtable) "rw")
               fc (.getChannel cask)]
     (let [bb (ByteBuffer/allocate (:size vtable))]
-      (.read fc bb (:pos vtable))
+      (.position fc (:pos vtable))
+      (while (.hasRemaining bb)
+        (.read fc bb))
       (.position bb 0)
       (let [time (.getLong bb)
             crc1 (.getLong bb)
@@ -107,7 +110,8 @@
         (let [key-size (count key)
               value-size (count value)
               time (System/nanoTime)
-              entry (doto (ByteBuffer/allocate (long (+ 8 8 8 value-size 8 key-size)))
+              entry (doto (ByteBuffer/allocate
+                           (long (+ 8 8 8 value-size 8 key-size)))
                       (.putLong 0 time)
                       (.putLong 8 0)
                       (.putLong 16 value-size)
@@ -121,27 +125,26 @@
 
 (defn entry-seq [file]
   (with-open [dis (-> file (RandomAccessFile. "r"))]
-    (letfn [(f
-             [place]
-             (lazy-seq
-              (when (> (.length file) place)
-                (.seek dis place)
-                (let [time (.readLong dis)
-                      crc (.readLong dis)
-                      value-size (.readLong dis)
-                      key-size (.readLong dis)
-                      key-bytes (byte-array key-size)]
-                  (.seek dis (+ place 32 value-size))
-                  (.read dis key-bytes)
-                  (cons
-                   [(String. key-bytes "utf8")
-                    (Vtable. (str (.getParent file) "/" (.getName file))
-                             place
-                             (+ 8 8 8 8 value-size key-size)
-                             crc
-                             time)]
-                   (f (.getFilePointer dis)))))))]
-      (doall (f 0)))))
+    (letfn [(f [place]
+               (lazy-seq
+                (when (> (.length file) place)
+                  (.seek dis place)
+                  (let [time (.readLong dis)
+                        crc (.readLong dis)
+                        value-size (.readLong dis)
+                        key-size (.readLong dis)
+                        key-bytes (byte-array key-size)]
+                    (.seek dis (+ place 32 value-size))
+                    (.read dis key-bytes)
+                    (cons
+                     [(String. key-bytes "utf8")
+                      (Vtable. (str (.getParent file) "/" (.getName file))
+                               place
+                               (+ 32 value-size key-size)
+                               crc
+                               time)]
+                     (f (.getFilePointer dis)))))))]
+      (doall (remove nil? (f 0))))))
 
 (defn entries []
   (mapcat entry-seq (rest (file-seq (File. dir)))))
@@ -149,7 +152,7 @@
 (defn recover []
   (doseq [[key vtable] (entries)]
     (if-let [c-vtable (get key-table key)]
-      (.put key-table key (last (sort-by :timestamp [c-vtable vtable]))) 
+      (.put key-table key (last (sort-by :timestamp [c-vtable vtable])))
       (.put key-table key vtable))))
 
 (defn compact []
