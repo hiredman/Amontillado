@@ -74,7 +74,7 @@
                                    (/ 64 8) ;; long ts
                                    (/ 64 8) ;; long key size
                                    key-size))
-        now (System/currentTimeMillis)
+        now (System/nanoTime)
         _ (doto bb
             (.putLong 0 Long/MAX_VALUE)
             (.putLong 8 Long/MAX_VALUE)
