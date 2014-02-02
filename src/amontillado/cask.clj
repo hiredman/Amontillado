@@ -202,7 +202,10 @@
     nil))
 
 ;; TODO: maybe check crc
-(defn read-key [^BitCask bc key]
+(defn read-key
+  "read the byte (array) value for the given key, returns nil if it
+  cannot find a value"
+  [^BitCask bc key]
   (let [key (ByteBuffer/wrap key)]
     (when-let [^longs kr (get @(.-dict bc) key)]
       (let [file-id (aget kr 0)
@@ -321,3 +324,21 @@
   "return the keys of this bitcask"
   [^BitCask bc]
   (map #(.array ^ByteBuffer %) (keys @(.dict bc))))
+
+(defn rollover
+  "finds files that contain less then threshold number live keys and
+  rolls them over in to new files, hopefully consolidating live files
+  so dead files can be deleted"
+  [^BitCask bc threshold]
+  (let [cf (current-file @(.-files bc))
+        freqs (frequencies (for [v (vals @(.-dict bc))] (:id v)))
+        ids-to-roll (set (for [[file-id freq] freqs
+                               :when (> threshold freq)
+                               :when (not= file-id (:id cf))]
+                           file-id))
+        keys-to-roll (for [[^ByteBuffer k ^longs v] @(.-dict bc)
+                           :when (contains? ids-to-roll (aget v 0))]
+                       (.array k))]
+    (doseq [key keys-to-roll
+            :let [v (read-key bc key)]]
+      (write-key bc key v))))
