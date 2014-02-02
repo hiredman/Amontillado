@@ -1,4 +1,15 @@
 (ns amontillado.cask
+  "Amontillado provides bitcask inspired storage for programs written
+  in Clojure. Bitcask is an append only log like file format for
+  storing key-value data made popular because it was/is available as a
+  storage backend for Riak. You can read Basho's description here
+  http://downloads.basho.com/papers/bitcask-intro.pdf.
+
+  Amontillado persists data to disk, while keeping an index(map) in
+  memory to make data retrieval fast.
+
+  The main api entry points are open-bitcask, write-key, read-key, and
+  delete-key,"
   (:require [clojure.java.io :as io]
             [clojure.core.protocols :as p]
             [clojure.core.reducers :as r])
@@ -116,7 +127,12 @@
     ;; TODO: real timestamp
     (key-dir-entry file-id (count value) value-pos 0)))
 
-(defn write-tombstone-to-cask [cask-file key]
+(defn write-tombstone-to-cask
+  "write a tombstone entry for a given key to a given file
+
+  a tombstone for a key is a marker that a given key has been
+  `deleted`"
+  [cask-file key]
   (let [^FileChannel fc (:channel cask-file)
         file-id (:id cask-file)
         r (file-tombstone-record key)
@@ -130,7 +146,9 @@
 (defn new-cask-files [directory limit]
   (->CaskFiles [] directory limit))
 
-(defn current-file [cf]
+(defn current-file
+  "given a CaskFiles returns the current file (the latest one)"
+  [cf]
   (let [f (:files cf)]
     (nth f (dec (count f)))))
 
@@ -277,7 +295,7 @@
     files)))
 
 (defn dead-files
-  "given a bitcask return a seq of files that are not reference by the
+  "given a bitcask return a seq of files that are not referenced by the
   in memory map"
   [^BitCask bc]
   (let [live-files (set (for [^longs v (vals @(.-dict bc))] (aget v 0)))]
