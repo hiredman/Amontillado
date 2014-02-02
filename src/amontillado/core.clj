@@ -5,7 +5,7 @@
            [java.util.concurrent ConcurrentHashMap]
            [clojure.lang ILookup Associative PersistentQueue]
            [java.nio ByteBuffer]
-           [java.nio.channels FileChannel]
+           [java.nio.channels FileChannel FileChannel$MapMode]
            [java.util.zip CRC32]))
 
 (def ^String dir (or (System/getProperty "cask.dir") "/tmp/amontillado"))
@@ -69,81 +69,112 @@
 (defn read-fn [vtable]
   (with-open [cask (RandomAccessFile. ^String (:file-name vtable) "rw")
               fc (.getChannel cask)]
-    (let [bb (ByteBuffer/allocate (:size vtable))]
-      (.position fc (:pos vtable))
-      (while (.hasRemaining bb)
-        (.read fc bb))
+    (let [bb (.map fc FileChannel$MapMode/READ_ONLY
+                   (:pos vtable)
+                   (:size vtable))]
       (.position bb 0)
       (let [time (.getLong bb)
             crc1 (.getLong bb)
             value-size (.getLong bb)
             key-size (.getLong bb)
             value (byte-array value-size)
-            _ (.putLong bb 8 0)
-            crc (.getValue
-                 (doto (CRC32.)
-                   (.update (.array bb))))]
-        (assert (= crc (:crc vtable)))
+            key (byte-array key-size)
+            long-bytes (byte-array 8)]
         (.position bb 32)
         (.get bb value)
+        (.get bb key)
+        (.position bb 0)
+        #_(let [crc (CRC32.)]
+          (.get bb long-bytes)
+          (.update crc long-bytes)
+          (.get bb long-bytes)
+          (.update crc (into-array Byte/TYPE (map byte (repeat 8 0))))
+          (.get bb long-bytes)
+          (.update crc long-bytes)
+          (.update crc value)
+          (.update crc key)
+          (assert (= (.getValue crc) crc1 (:crc vtable))))
         value))))
 
+(defprotocol IRemoveKeys
+  (remove-key [m key]))
+
 (def cask
-     (reify
-      ILookup
-      (valAt [this key] (.valAt this key nil))
-      (valAt [this key default]
-             (let [key (String. ^bytes key "utf8")]
-               (if (.get key-table key)
-                 (try
-                   (read-fn (.get key-table key))
-                   (catch Exception e
-                     (throw (Exception. (str "problem reading " key) e))))
-                 default)))
-      Associative
-      (containsKey [this key]
-                   (let [sent (Object.)]
-                     (not (identical? ) (.valAt this key sent))))
-      (entryAt [this key]
-               [key (.valAt this key)])
-      (assoc [this key value]
-        (let [key-size (count key)
-              value-size (count value)
-              time (System/nanoTime)
-              entry (doto (ByteBuffer/allocate
-                           (long (+ 8 8 8 value-size 8 key-size)))
-                      (.putLong 0 time)
-                      (.putLong 8 0)
-                      (.putLong 16 value-size)
-                      (.putLong 24 key-size)
-                      (.position 32)
-                      (.put ^bytes value)
-                      (.put ^bytes key)
-                      .flip)]
-          (.put key-table (String. ^bytes key "utf8") (write entry)))
-        this)))
+  (reify
+    ILookup
+    (valAt [this key] (.valAt this key nil))
+    (valAt [this key default]
+      (let [key (String. ^bytes key "utf8")]
+        (if (.get key-table key)
+          (try
+            (read-fn (.get key-table key))
+            (catch Exception e
+              (throw (Exception. (str "problem reading " key) e))))
+          default)))
+    Associative
+    (containsKey [this key]
+      (let [sent (Object.)]
+        (not (identical? ) (.valAt this key sent))))
+    (entryAt [this key]
+      [key (.valAt this key)])
+    (assoc [this key value]
+      (let [key-size (count key)
+            value-size (count value)
+            time (System/nanoTime)
+            entry (doto (ByteBuffer/allocate
+                         (long (+ 8 8 8 value-size 8 key-size)))
+                    (.putLong 0 time)
+                    (.putLong 8 0)
+                    (.putLong 16 value-size)
+                    (.putLong 24 key-size)
+                    (.position 32)
+                    (.put ^bytes value)
+                    (.put ^bytes key)
+                    .flip)]
+        (.put key-table (String. ^bytes key "utf8") (write entry)))
+      this)
+    IRemoveKeys
+    (remove-key [m key]
+      (println "remove key" )
+      (let [key-size (count key)
+            value-size 0
+            time (System/nanoTime)
+            entry (doto (ByteBuffer/allocate
+                         (long (+ 8 8 8 value-size 8 key-size)))
+                    (.putLong 0 time)
+                    (.putLong 8 0)
+                    (.putLong 16 value-size)
+                    (.putLong 24 key-size)
+                    (.position 32)
+                    (.put ^bytes (byte-array 0))
+                    (.put ^bytes key)
+                    .flip)]
+        (write entry)
+        (.remove key-table (String. ^bytes key "utf8"))))))
 
 (defn entry-seq [file]
   (with-open [dis (-> file (RandomAccessFile. "r"))]
     (letfn [(f [place]
-               (lazy-seq
-                (when (> (.length file) place)
-                  (.seek dis place)
-                  (let [time (.readLong dis)
-                        crc (.readLong dis)
-                        value-size (.readLong dis)
-                        key-size (.readLong dis)
-                        key-bytes (byte-array key-size)]
-                    (.seek dis (+ place 32 value-size))
-                    (.read dis key-bytes)
-                    (cons
-                     [(String. key-bytes "utf8")
-                      (Vtable. (str (.getParent file) "/" (.getName file))
-                               place
-                               (+ 32 value-size key-size)
-                               crc
-                               time)]
-                     (f (.getFilePointer dis)))))))]
+              (lazy-seq
+               (when (> (.length file) place)
+                 (.seek dis place)
+                 (let [time (.readLong dis)
+                       crc (.readLong dis)
+                       value-size (.readLong dis)
+                       key-size (.readLong dis)
+                       key-bytes (byte-array key-size)]
+                   (.seek dis (+ place 32 value-size))
+                   (.read dis key-bytes)
+                   (if (zero? value-size)
+                     (f (.getFilePointer dis))
+                     (cons
+                      [(String. key-bytes "utf8")
+                       (Vtable. (str (.getParent file) "/" (.getName file))
+                                place
+                                (+ 32 value-size key-size)
+                                crc
+                                time)]
+                      (f (.getFilePointer dis))))))))]
       (doall (remove nil? (f 0))))))
 
 (defn entries []
@@ -152,8 +183,19 @@
 (defn recover []
   (doseq [[key vtable] (entries)]
     (if-let [c-vtable (get key-table key)]
-      (.put key-table key (last (sort-by :timestamp [c-vtable vtable])))
-      (.put key-table key vtable))))
+      (.put key-table key
+            (cond
+             (zero? (:timestamp vtable))
+             vtable
+             (zero? (:timestamp c-vtable))
+             c-vtable
+             :else (last (sort-by :timestamp [vtable c-vtable]))))
+      (when-not (zero? (:timestamp vtable))
+        (.put key-table key vtable))))
+  (doseq [[k v] key-table
+          :when (zero? (:timestamp v))]
+    (println k)
+    (.remove key-table k)))
 
 (defn compact []
   ;; TODO:
