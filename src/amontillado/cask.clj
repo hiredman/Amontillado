@@ -135,7 +135,7 @@
     (nth f (dec (count f)))))
 
 (defn ^File id-to-file [directory id]
-  (io/file directory (.replace (format "%32s" (Long/toHexString id)) " " "0")))
+  (io/file directory (.replace (format "%16s" (Long/toHexString id)) " " "0")))
 
 (defn cask-file
   "given a file-id and a directory, returns a CaskFile with that id"
