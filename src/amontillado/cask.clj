@@ -1,5 +1,7 @@
 (ns amontillado.cask
-  (:require [clojure.java.io :as io])
+  (:require [clojure.java.io :as io]
+            [clojure.core.protocols :as p]
+            [clojure.core.reducers :as r])
   (:import (java.nio ByteBuffer)
            (java.util.zip CRC32)
            (java.io RandomAccessFile
@@ -212,44 +214,46 @@
           (assert (= bytes-read (.capacity bb))))
         (.array bb)))))
 
-;; TODO: replace with reducer
-(defn entry-seq
-  [cask-file]
-  (let [^RandomAccessFile c (:raf cask-file)]
-    ((fn continue [offset]
-       (when (< offset (.length c))
-         (lazy-seq
-          (.seek c offset)
-          (let [crc (.readLong c)
-                ts (.readLong c)]
-            (if-not (and (= crc Long/MAX_VALUE)
-                         (= ts Long/MAX_VALUE))
-              (let [ks (.readLong c)
-                    vs (.readLong c)
-                    k (byte-array ks)
-                    _ (.read c k)
-                    v (byte-array vs)
-                    _ (.read c v)
-                    bb (file-record-no-crc ts k v)]
-                (when-not (= (amontillado.cask/crc bb) crc)
-                  (throw (IllegalStateException.
-                          (str "bad crc in " c " at " offset))))
-                (cons
-                 [(ByteBuffer/wrap k)
-                  (key-dir-entry (:id cask-file)
-                                 vs
-                                 offset
-                                 ts)]
-                 (continue (+ offset 32 ks vs))))
-              (let [ts (.readLong c)
-                    crc (.readLong c)
-                    ks (.readLong c)
-                    k (byte-array ks)
-                    _ (.read c k)]
-                (cons
-                 [(ByteBuffer/wrap k) ::tombstone]
-                 (continue (+ offset ks (* 8 5))))))))))
-     0)))
+(defn entry-source [cask-file]
+  (reify
+    p/CollReduce
+    (coll-reduce [this f1]
+      (p/coll-reduce this f1 (f1)))
+    (coll-reduce [_ f1 init]
+      (let [^RandomAccessFile c (:raf cask-file)]
+        (loop [init init
+               offset 0]
+          (if (>= offset (.length c))
+            init
+            (do
+              (.seek c offset)
+              (let [crc (.readLong c)
+                    ts (.readLong c)]
+                (if-not (and (= crc Long/MAX_VALUE)
+                             (= ts Long/MAX_VALUE))
+                  (let [ks (.readLong c)
+                        vs (.readLong c)
+                        k (byte-array ks)
+                        _ (.read c k)
+                        v (byte-array vs)
+                        _ (.read c v)
+                        bb (file-record-no-crc ts k v)]
+                    (when-not (= (amontillado.cask/crc bb) crc)
+                      (throw (IllegalStateException.
+                              (str "bad crc in " c " at " offset))))
+                    (recur
+                     (f1 init
+                         (ByteBuffer/wrap k)
+                         (key-dir-entry (:id cask-file) vs offset ts))
+                     (+ offset 32 ks vs)))
+                  (let [ts (.readLong c)
+                        crc (.readLong c)
+                        ks (.readLong c)
+                        k (byte-array ks)
+                        _ (.read c k)]
+                    (recur
+                     (f1 init (ByteBuffer/wrap k) ::tombstone)
+                     (+ offset ks (* 8 5)))))))))))))
 
 (defn renumber-files
   "if dead, no longer needed, files are deleted, the existing files
@@ -276,14 +280,15 @@
   (let [live-files (set (for [^longs v (vals @(.-dict bc))] (aget v 0)))]
     (for [f (:files @(.-files bc))
           :when (not (contains? live-files (:id f)))]
-      (io/file (:directory @(.-files bc))
-               (.replace (format "%32s" (Long/toHexString (:id f))) " " "0")))))
+      (id-to-file (:directory @(.-files bc)) (:id f)))))
 
 (defn open-bitcask
   "open a new or existing bitcask
 
   takes the directory to write the cask files to, and a limit in bytes
-  to split the files at"
+  to split the files at
+
+  when opening an already existing bitcask deletes all the dead files"
   [directory & [limit]]
   (let [directory (io/file directory)]
     (if (empty? (.listFiles directory))
@@ -296,11 +301,13 @@
                      (.getChannel raf)
                      raf))
             files (vec (renumber-files directory (sort-by :id files)))
-            ;; TODO: combine as a reduce
-            dict (into {} (mapcat entry-seq files))
-            dict (into {} (for [[k v] dict
-                                :when (not= v ::tombstone)]
-                            [k v]))
+            dict (reduce
+                  (fn [m k v]
+                    (if (= v ::tombstone)
+                      (dissoc m k)
+                      (assoc m k v)))
+                  {}
+                  (r/mapcat entry-source files))
             bc (->BitCask (atom dict)
                           (atom (assoc (new-cask-files
                                         directory
