@@ -1,15 +1,13 @@
 # amontillado
 
-FIXME: write description
+bitcask inspired storage for clojure
+
+in the throws of a rewrite after 3 years of inactivity
 
 ## Usage
 
-FIXME: write
-
 ## Installation
-
-FIXME: write
 
 ## License
 
-Copyright (c) 2010 Kevin Downey and released under an MIT license.
+Copyright (c) 2014 Kevin Downey and released under an MIT license.
