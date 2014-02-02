@@ -77,3 +77,12 @@
     (let [nb (open-bitcask temp 1024)]
       (doseq [[k v] @r]
         (is (= v (String. (read-key nb (.getBytes k)))))))))
+
+(deftest t-cask-keys
+  (let [temp (File/createTempFile "foo" "bar")
+        _ (.delete temp)
+        keys (repeatedly 100 #(str (UUID/randomUUID)))]
+    (with-open [bc (new-bitcask temp 1024)]
+      (doseq [key keys]
+        (write-key bc (.getBytes key) (.getBytes "bar")))
+      (is (= (set keys) (set (map #(String. %) (cask-keys bc))))))))
