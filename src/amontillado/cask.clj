@@ -17,7 +17,8 @@
            (java.util.zip CRC32)
            (java.io RandomAccessFile
                     File)
-           (java.nio.channels FileChannel)))
+           (java.nio.channels FileChannel)
+           (java.util.concurrent ConcurrentHashMap)))
 
 (defn crc
   "calculate the crc of a byte buffer"
@@ -195,7 +196,7 @@
     (assert (.exists directory))
     (assert (.isDirectory directory))
     (assert (empty? (.listFiles directory)))
-    (->BitCask (atom {})
+    (->BitCask (ConcurrentHashMap.)
                (atom (new-cask-files directory (or limit (* 1024 1024 200)))))))
 
 (defn write-key
@@ -206,7 +207,7 @@
         _ (swap! cask-files check-current-file)
         cf (current-file @cask-files)
         kr (write-to-cask cf key value)
-        _ (swap! (.-dict bc) assoc (ByteBuffer/wrap key) kr)]
+        _ (.put ^java.util.Map (.-dict bc) (ByteBuffer/wrap key) kr)]
     nil))
 
 (defn delete-key
@@ -217,7 +218,7 @@
         _ (swap! cask-files check-current-file)
         cf (current-file @cask-files)
         kr (write-tombstone-to-cask cf key)
-        _ (swap! (.-dict bc) dissoc (ByteBuffer/wrap key))]
+        _ (.remove ^java.util.Map (.-dict bc) (ByteBuffer/wrap key))]
     nil))
 
 ;; TODO: maybe check crc
@@ -226,7 +227,7 @@
   cannot find a value"
   [^BitCask bc key]
   (let [key (ByteBuffer/wrap key)]
-    (when-let [^longs kr (get @(.-dict bc) key)]
+    (when-let [^longs kr (get (.-dict bc) key)]
       (let [file-id (aget kr 0)
             bb (ByteBuffer/allocate (aget kr 1))
             pos (+ (aget kr 2) 32 (.capacity key))
@@ -239,7 +240,7 @@
 (defn read-key-as-bb
   [^BitCask bc key]
   (let [key (ByteBuffer/wrap key)]
-    (when-let [^longs kr (get @(.-dict bc) key)]
+    (when-let [^longs kr (get (.-dict bc) key)]
       (let [file-id (aget kr 0)
             file (nth (:files @(.-files bc)) file-id)
             pos (+ (aget kr 2) 32 (.capacity key))
@@ -311,7 +312,7 @@
   "given a bitcask return a seq of files that are not referenced by the
   in memory map"
   [^BitCask bc]
-  (let [live-files (set (for [^longs v (vals @(.-dict bc))] (aget v 0)))]
+  (let [live-files (set (for [^longs v (vals (.-dict bc))] (aget v 0)))]
     (for [f (:files @(.-files bc))
           :when (not (contains? live-files (:id f)))]
       (id-to-file (:directory @(.-files bc)) (:id f)))))
@@ -336,13 +337,17 @@
                      raf))
             files (vec (renumber-files directory (sort-by :id files)))
             dict (reduce
-                  (fn [m k v]
+                  (fn [^java.util.Map m k v]
                     (if (= v ::tombstone)
-                      (dissoc m k)
-                      (assoc m k v)))
-                  {}
+                      (do
+                        (.remove m k)
+                        m)
+                      (do
+                        (.put m k v)
+                        m)))
+                  (ConcurrentHashMap.)
                   (r/mapcat entry-source files))
-            bc (->BitCask (atom dict)
+            bc (->BitCask dict
                           (atom (assoc (new-cask-files
                                         directory
                                         (or limit (* 1024 1024 200)))
@@ -354,7 +359,7 @@
 (defn cask-keys
   "return the keys of this bitcask"
   [^BitCask bc]
-  (map #(.array ^ByteBuffer %) (keys @(.dict bc))))
+  (map #(.array ^ByteBuffer %) (keys (.dict bc))))
 
 (defn rollover
   "finds files that contain less then threshold number live keys and
@@ -362,14 +367,32 @@
   so dead files can be deleted"
   [^BitCask bc threshold]
   (let [cf (current-file @(.-files bc))
-        freqs (frequencies (for [v (vals @(.-dict bc))] (:id v)))
+        freqs (frequencies (for [v (vals (.-dict bc))] (:id v)))
         ids-to-roll (set (for [[file-id freq] freqs
                                :when (> threshold freq)
                                :when (not= file-id (:id cf))]
                            file-id))
-        keys-to-roll (for [[^ByteBuffer k ^longs v] @(.-dict bc)
+        keys-to-roll (for [[^ByteBuffer k ^longs v] (.-dict bc)
                            :when (contains? ids-to-roll (aget v 0))]
                        (.array k))]
     (doseq [key keys-to-roll
             :let [v (read-key bc key)]]
       (write-key bc key v))))
+
+;; TODO: hint files
+
+(defn cask-contains?
+  "returns true if the given cask has had a value for the given key,
+  and that key was not removed after it was written.
+
+  This function does not require a disk seek/read like read-key does."
+  [^BitCask bc ^bytes key]
+  (contains? (.-dict bc) (ByteBuffer/wrap key)))
+
+(defn cask-density
+  "returns a map of file ids to live entry counts"
+  [^BitCask bc]
+  (apply merge-with +
+         (frequencies (map #(aget ^longs % 0) (vals (.-dict bc))))
+         (for [f (:files @(.-files bc))]
+           {(:id f) 0})))
