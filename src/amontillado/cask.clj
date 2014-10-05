@@ -235,6 +235,18 @@
           (assert (= bytes-read (.capacity bb))))
         (.array bb)))))
 
+(defn read-key-as-bb
+  [^BitCask bc key]
+  (let [key (ByteBuffer/wrap key)]
+    (when-let [^longs kr (get @(.-dict bc) key)]
+      (let [file-id (aget kr 0)
+            file (nth (:files @(.-files bc)) file-id)
+            pos (+ (aget kr 2) 32 (.capacity key))
+            ^FileChannel fc (:channel file)
+            bb (.map fc java.nio.channels.FileChannel$MapMode/READ_ONLY
+                     pos (aget kr 1))]
+        bb))))
+
 (defn entry-source [cask-file]
   (reify
     p/CollReduce
