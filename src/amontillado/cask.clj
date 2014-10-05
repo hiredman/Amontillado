@@ -22,9 +22,10 @@
 (defn crc
   "calculate the crc of a byte buffer"
   [^ByteBuffer bb]
-  (.getValue
-   (doto (CRC32.)
-     (.update (.array bb)))))
+  (let [crc (CRC32.)]
+    (dotimes [i (.capacity bb)]
+      (.update crc (.get bb i)))
+    (.getValue crc)))
 
 (defn ^ByteBuffer file-record-no-crc [ts ^bytes k ^bytes v]
   (let [bb (ByteBuffer/allocate (+ (/ 64 8) ;; long crc
