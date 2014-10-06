@@ -317,6 +317,9 @@
           :when (not (contains? live-files (:id f)))]
       (id-to-file (:directory @(.-files bc)) (:id f)))))
 
+(declare hint-file-last-modified
+         load-hint-file)
+
 (defn open-bitcask
   "open a new or existing bitcask
 
@@ -328,33 +331,49 @@
   (let [directory (io/file directory)]
     (if (empty? (.listFiles directory))
       (new-bitcask directory limit)
-      (let [files (for [^File f (file-seq directory)
-                        :when (not (.isDirectory f))
+      (let [files' (for [^File f (file-seq directory)
+                         :when (not (.isDirectory f))
+                         :when (not (.startsWith (.getName f) "."))]
+                     f)
+            files (for [^File f files'
                         :let [raf (RandomAccessFile. f "rw")]]
                     (->CaskFile
                      (Long/parseLong (.getName f) 16)
                      (.getChannel raf)
                      raf))
-            files (vec (renumber-files directory (sort-by :id files)))
-            dict (reduce
-                  (fn [^java.util.Map m k v]
-                    (if (= v ::tombstone)
-                      (do
-                        (.remove m k)
-                        m)
-                      (do
-                        (.put m k v)
-                        m)))
-                  (ConcurrentHashMap.)
-                  (r/mapcat entry-source files))
-            bc (->BitCask dict
-                          (atom (assoc (new-cask-files
-                                        directory
-                                        (or limit (* 1024 1024 200)))
-                                  :files files)))]
-        (doseq [^File f (dead-files bc)]
-          (.delete f))
-        bc))))
+            files (vec (renumber-files directory (sort-by :id files)))]
+
+        (if (and (.exists (io/file directory ".hint"))
+                 (> (hint-file-last-modified (io/file directory ".hint"))
+                    (apply max (for [f files'] (.lastModified f)))))
+          (let [m (load-hint-file (io/file directory ".hint"))
+                bc (->BitCask m
+                              (atom (assoc (new-cask-files
+                                            directory
+                                            (or limit (* 1024 1024 200)))
+                                      :files files)))]
+            (doseq [^File f (dead-files bc)]
+              (.delete f))
+            bc)
+          (let [dict (reduce
+                      (fn [^java.util.Map m k v]
+                        (if (= v ::tombstone)
+                          (do
+                            (.remove m k)
+                            m)
+                          (do
+                            (.put m k v)
+                            m)))
+                      (ConcurrentHashMap.)
+                      (r/mapcat entry-source files))
+                bc (->BitCask dict
+                              (atom (assoc (new-cask-files
+                                            directory
+                                            (or limit (* 1024 1024 200)))
+                                      :files files)))]
+            (doseq [^File f (dead-files bc)]
+              (.delete f))
+            bc))))))
 
 (defn cask-keys
   "return the keys of this bitcask"
@@ -379,8 +398,6 @@
             :let [v (read-key bc key)]]
       (write-key bc key v))))
 
-;; TODO: hint files
-
 (defn cask-contains?
   "returns true if the given cask has had a value for the given key,
   and that key was not removed after it was written.
@@ -396,3 +413,72 @@
          (frequencies (map #(aget ^longs % 0) (vals (.-dict bc))))
          (for [f (:files @(.-files bc))]
            {(:id f) 0})))
+
+(defn generate-hint-file
+  [^BitCask bc]
+  (let [hint-file (io/file (.-directory ^CaskFiles (deref (.-files bc))) ".hint")
+        _ (.createNewFile hint-file)
+        now (System/currentTimeMillis)
+        bb (ByteBuffer/allocate 8)]
+    (with-open [f (java.io.FileOutputStream. hint-file)
+                c (.getChannel f)]
+      (.write c bb)
+      (.force c true)
+      (.flip bb)
+      (doseq [[^ByteBuffer k ^longs v] (.-dict bc)]
+        (let [bb (ByteBuffer/allocate
+                  (+ 8 (.capacity k) (* 8 4)))]
+          (doto bb
+            (.putLong (long (.capacity k)))
+            (.put (.slice k))
+            (.putLong (aget v 0))
+            (.putLong (aget v 1))
+            (.putLong (aget v 2))
+            (.putLong (aget v 3))
+            (.flip))
+          (while (.hasRemaining bb)
+            (.write c bb))))
+      (.position c 0)
+      (.flip (.putLong bb now))
+      (while (.hasRemaining bb)
+        (.write c bb)))))
+
+(defn load-hint-file
+  [hint-file]
+  {:post [(not (empty? %))]}
+  (let [m (ConcurrentHashMap.)]
+    (with-open [raf (RandomAccessFile. hint-file "r")]
+      (.readLong raf)
+      (try
+        (loop []
+          (let [key-size (.readLong raf)
+                key (byte-array key-size)
+                _ (.readFully raf key)
+                a (.readLong raf)
+                a' (.readLong raf)
+                a'' (.readLong raf)
+                a''' (.readLong raf)
+                e (key-dir-entry a a' a'' a''')]
+            (.put m (ByteBuffer/wrap key) e))
+          (recur))
+        (catch java.io.EOFException _)))
+    m))
+
+(defn hint-file-last-modified
+  [hint-file]
+  (with-open [raf (RandomAccessFile. hint-file "r")]
+    (.readLong raf)))
+
+(defn hint-file-exists?
+  [^BitCask bc]
+  (.exists (io/file (.-directory ^CaskFiles (deref (.-files bc))) ".hint")))
+
+(defn validate-hint-file
+  [^BitCask bc]
+  (let [m (load-hint-file
+           (io/file (.-directory ^CaskFiles @(.-files bc)) ".hint"))]
+    (assert (= (count m) (count (.-dict bc)))
+            (list (count m) (count (.-dict bc))))
+    (doseq [[k v] (.-dict bc)]
+      (assert (= (vec (.get m k)) (vec v))
+              (list (vec (.get m k)) (vec v))))))
